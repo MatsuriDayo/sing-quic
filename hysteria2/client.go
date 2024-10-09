@@ -2,6 +2,7 @@ package hysteria2
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -13,13 +14,13 @@ import (
 
 	"github.com/sagernet/quic-go"
 	"github.com/sagernet/quic-go/congestion"
-	"github.com/sagernet/quic-go/http3"
-	"github.com/sagernet/sing-quic"
+	qtls "github.com/sagernet/sing-quic"
 	congestion_meta1 "github.com/sagernet/sing-quic/congestion_meta1"
 	congestion_meta2 "github.com/sagernet/sing-quic/congestion_meta2"
 	"github.com/sagernet/sing-quic/hysteria"
 	hyCC "github.com/sagernet/sing-quic/hysteria/congestion"
 	"github.com/sagernet/sing-quic/hysteria2/internal/protocol"
+	hop "github.com/sagernet/sing-quic/udphop"
 	"github.com/sagernet/sing/common/baderror"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -42,6 +43,8 @@ type ClientOptions struct {
 	Password           string
 	TLSConfig          aTLS.Config
 	UDPDisabled        bool
+	HopPorts           string
+	HopInterval        int
 }
 
 type Client struct {
@@ -57,6 +60,8 @@ type Client struct {
 	tlsConfig          aTLS.Config
 	quicConfig         *quic.Config
 	udpDisabled        bool
+	hopPorts           string
+	hopInterval        time.Duration
 
 	connAccess sync.RWMutex
 	conn       *clientQUICConnection
@@ -73,9 +78,6 @@ func NewClient(options ClientOptions) (*Client, error) {
 		MaxIdleTimeout:                 hysteria.DefaultMaxIdleTimeout,
 		KeepAlivePeriod:                hysteria.DefaultKeepAlivePeriod,
 	}
-	if len(options.TLSConfig.NextProtos()) == 0 {
-		options.TLSConfig.SetNextProtos([]string{http3.NextProtoH3})
-	}
 	return &Client{
 		ctx:                options.Context,
 		dialer:             options.Dialer,
@@ -89,6 +91,8 @@ func NewClient(options ClientOptions) (*Client, error) {
 		tlsConfig:          options.TLSConfig,
 		quicConfig:         quicConfig,
 		udpDisabled:        options.UDPDisabled,
+		hopPorts:           options.HopPorts,
+		hopInterval:        time.Duration(options.HopInterval) * time.Second,
 	}, nil
 }
 
@@ -116,9 +120,18 @@ func (c *Client) offerNew(ctx context.Context) (*clientQUICConnection, error) {
 		return nil, err
 	}
 	var packetConn net.PacketConn
-	packetConn = bufio.NewUnbindPacketConn(udpConn)
+	if c.hopPorts != "" {
+		packetConn, err = hop.NewUDPHopPacketConn(c.serverAddr.AddrString(), c.hopPorts, c.hopInterval, func() (net.PacketConn, error) {
+			return c.dialer.ListenPacket(c.ctx, c.serverAddr)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("hop.NewUDPHopPacketConn: %w", err)
+		}
+	} else {
+		packetConn = bufio.NewUnbindPacketConn(udpConn)
+	}
 	if c.salamanderPassword != "" {
-		packetConn = NewSalamanderConn(packetConn, []byte(c.salamanderPassword))
+		packetConn = NewSalamanderConn(packetConn, []byte(c.salamanderPassword), c.hopPorts != "")
 	}
 	var quicConn quic.EarlyConnection
 	http3Transport, err := qtls.CreateTransport(packetConn, &quicConn, c.serverAddr, c.tlsConfig, c.quicConfig)

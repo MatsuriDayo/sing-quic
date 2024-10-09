@@ -21,9 +21,9 @@ type SalamanderPacketConn struct {
 	password []byte
 }
 
-func NewSalamanderConn(conn net.PacketConn, password []byte) net.PacketConn {
+func NewSalamanderConn(conn net.PacketConn, password []byte, disableVectorised bool) net.PacketConn {
 	writer, isVectorised := bufio.CreateVectorisedPacketWriter(conn)
-	if isVectorised {
+	if isVectorised && !disableVectorised {
 		return &VectorisedSalamanderPacketConn{
 			SalamanderPacketConn: SalamanderPacketConn{
 				PacketConn: conn,
